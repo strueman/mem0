@@ -7,11 +7,7 @@ from typing import Any, Dict
 
 from pydantic import ValidationError
 
-from mem0.llms.utils.tools import (
-    ADD_MEMORY_TOOL,
-    DELETE_MEMORY_TOOL,
-    UPDATE_MEMORY_TOOL,
-)
+from mem0.llms.utils.tools import ADD_MEMORY_TOOL, UPDATE_MEMORY_TOOL, DELETE_MEMORY_TOOL
 from mem0.configs.prompts import MEMORY_DEDUCTION_PROMPT
 from mem0.memory.base import MemoryBase
 from mem0.memory.setup import setup_config
@@ -88,15 +84,28 @@ class Memory(MemoryBase):
 
         if not prompt:
             prompt = MEMORY_DEDUCTION_PROMPT.format(user_input=data, metadata=metadata)
+        
+        # Add examples and explicit instructions for tool use
+        prompt += "\n\nTo add a memory, use the add_memory function. Example: add_memory(data='User likes pizza')"
+
         extracted_memories = self.llm.generate_response(
             messages=[
                 {
                     "role": "system",
-                    "content": "You are an expert at deducing facts, preferences and memories from unstructured text.",
+                    "content": "You are an expert at deducing facts, preferences and memories from unstructured text. Use the provided tools to add memories.",
                 },
                 {"role": "user", "content": prompt},
             ]
         )
+
+        # Add error handling and fallback mechanism
+        if 'tool_calls' not in extracted_memories or not extracted_memories['tool_calls']:
+            # Fallback: directly add the extracted memories
+            for memory in extracted_memories.split('\n'):
+                if memory.strip():
+                    self._create_memory_tool(data=memory.strip())
+            return {"message": "Memories added using fallback method"}
+
         existing_memories = self.vector_store.search(
             query=embeddings,
             limit=5,
@@ -119,7 +128,6 @@ class Memory(MemoryBase):
         messages = get_update_memory_messages(
             serialized_existing_memories, extracted_memories
         )
-        # Add tools for noop, add, update, delete memory.
         tools = [ADD_MEMORY_TOOL, UPDATE_MEMORY_TOOL, DELETE_MEMORY_TOOL]
         response = self.llm.generate_response(messages=messages, tools=tools)
         tool_calls = response["tool_calls"]
@@ -159,8 +167,11 @@ class Memory(MemoryBase):
                     {"memory_id": function_result, "function_name": function_name},
                 )
         capture_event("mem0.add", self)
-
-        return {"message": "ok", "id":function_result}
+        try:
+            mem_id = str(function_result)
+            return {"message": "ok", "id":mem_id}
+        except:
+            return {"message": "ok", "id":"No ID returned"}
 
     def get(self, memory_id):
         """
